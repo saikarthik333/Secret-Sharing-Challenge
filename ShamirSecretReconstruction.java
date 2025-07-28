@@ -18,11 +18,9 @@ public class ShamirSecretReconstruction {
 
     // Parse a number string from given base into BigInteger
     static BigInteger decodeValue(String value, int base) {
-        // For bases <= 36, use built-in BigInteger parsing
         if (base <= 36) {
             return new BigInteger(value.toLowerCase(), base);
         }
-        // For bases > 36, parse manually digit by digit
         BigInteger result = BigInteger.ZERO;
         BigInteger b = BigInteger.valueOf(base);
         for (char ch : value.toCharArray()) {
@@ -41,31 +39,79 @@ public class ShamirSecretReconstruction {
         throw new IllegalArgumentException("Invalid character in number: " + ch);
     }
 
-    // Compute the constant term of polynomial using Lagrange interpolation at x=0
-    private static BigInteger lagrangeInterpolationAtZero(List<SharePoint> points) {
-        BigInteger secret = BigInteger.ZERO;
+    // Solve the system M * A = Y where M is Vandermonde matrix of size kxk:
+    // M[i][j] = (x_i)^j for j=0..k-1 (constant term is column 0)
+    // A are the polynomial coefficients: a_0 (constant), a_1, ..., a_{k-1}
+    // Y is vector of y_i values
+    //
+    // Gaussian elimination is implemented with BigInteger; exact division is expected to hold.
+    private static BigInteger[] solvePolynomialCoefficients(List<SharePoint> points) {
         int k = points.size();
+        BigInteger[][] mat = new BigInteger[k][k];
+        BigInteger[] vec = new BigInteger[k];
 
+        // Build Vandermonde matrix and Y vector
         for (int i = 0; i < k; i++) {
-            BigInteger xi = points.get(i).x;
-            BigInteger yi = points.get(i).y;
-
-            BigInteger numerator = BigInteger.ONE; // product of (0 - x_j)
-            BigInteger denominator = BigInteger.ONE; // product of (x_i - x_j)
-
+            BigInteger x = points.get(i).x;
+            BigInteger power = BigInteger.ONE;
             for (int j = 0; j < k; j++) {
-                if (j == i) continue;
-                BigInteger xj = points.get(j).x;
-                numerator = numerator.multiply(BigInteger.ZERO.subtract(xj));
-                denominator = denominator.multiply(xi.subtract(xj));
+                mat[i][j] = power;
+                power = power.multiply(x);
             }
-
-            // Perform exact division since values are integers
-            BigInteger li = numerator.divide(denominator);
-            secret = secret.add(yi.multiply(li));
+            vec[i] = points.get(i).y;
         }
 
-        return secret;
+        // Gaussian Elimination to solve mat * A = vec
+        for (int pivot = 0; pivot < k; pivot++) {
+            // Find pivot row and swap if needed (partial pivoting for robustness)
+            int maxRow = pivot;
+            for (int r = pivot + 1; r < k; r++) {
+                if (mat[r][pivot].abs().compareTo(mat[maxRow][pivot].abs()) > 0) {
+                    maxRow = r;
+                }
+            }
+            if (maxRow != pivot) {
+                BigInteger[] tempRow = mat[pivot];
+                mat[pivot] = mat[maxRow];
+                mat[maxRow] = tempRow;
+
+                BigInteger tempVal = vec[pivot];
+                vec[pivot] = vec[maxRow];
+                vec[maxRow] = tempVal;
+            }
+
+            if (mat[pivot][pivot].equals(BigInteger.ZERO)) {
+                throw new ArithmeticException("Matrix is singular or system has no unique solution");
+            }
+
+            // Normalize pivot row (make pivot element = 1)
+            BigInteger pivotVal = mat[pivot][pivot];
+            for (int c = pivot; c < k; c++) {
+                mat[pivot][c] = mat[pivot][c].divide(pivotVal); // exact division expected
+            }
+            vec[pivot] = vec[pivot].divide(pivotVal);
+
+            // Eliminate below pivot
+            for (int r = pivot + 1; r < k; r++) {
+                BigInteger factor = mat[r][pivot];
+                for (int c = pivot; c < k; c++) {
+                    mat[r][c] = mat[r][c].subtract(factor.multiply(mat[pivot][c]));
+                }
+                vec[r] = vec[r].subtract(factor.multiply(vec[pivot]));
+            }
+        }
+
+        // Back substitution
+        BigInteger[] result = new BigInteger[k];
+        for (int i = k - 1; i >= 0; i--) {
+            BigInteger sum = vec[i];
+            for (int j = i + 1; j < k; j++) {
+                sum = sum.subtract(mat[i][j].multiply(result[j]));
+            }
+            result[i] = sum; // Should already be exact
+        }
+
+        return result;
     }
 
     // Reads shares from JSON content and returns Map<x, y>
@@ -98,7 +144,7 @@ public class ShamirSecretReconstruction {
         return shares;
     }
 
-    // Selects first k shares for reconstruction
+    // Select first k shares for reconstruction
     private static List<SharePoint> selectKShares(Map<BigInteger, BigInteger> shares, int k) {
         List<SharePoint> chosen = new ArrayList<>();
         int count = 0;
@@ -127,7 +173,9 @@ public class ShamirSecretReconstruction {
 
             List<SharePoint> selectedPoints = selectKShares(shares, k);
 
-            BigInteger secret = lagrangeInterpolationAtZero(selectedPoints);
+            BigInteger[] coefficients = solvePolynomialCoefficients(selectedPoints);
+
+            BigInteger secret = coefficients[0];  // constant term c
 
             System.out.println("Secret for test case " + (testIndex + 1) + ": " + secret.toString());
         }
